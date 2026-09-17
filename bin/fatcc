@@ -1,0 +1,5 @@
+#!/bin/sh
+# fatcc -- C -> .fc bytecode compiler (Erlang implementation)
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec erl -noshell -pa "$DIR/ebin" \
+  -eval 'fatcc:main(init:get_plain_arguments())' -extra "$@"

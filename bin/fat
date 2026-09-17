@@ -1,0 +1,5 @@
+#!/bin/sh
+# fat -- bytecode runtime for .fc files (Erlang implementation)
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec erl -noshell -pa "$DIR/ebin" \
+  -eval 'fat:main(init:get_plain_arguments())' -extra "$@"
