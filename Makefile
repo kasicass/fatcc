@@ -4,24 +4,20 @@
 #   make            compile all Erlang modules into ebin/
 #   make test       run the end-to-end test suite
 #   make clean      remove build artifacts
+#
+# Written to work with both GNU make and BSD make (the shell does the globbing).
 
 ERLC ?= erlc
-ERL  ?= erl
-SRC  := $(wildcard src/*.erl)
-BEAM := $(patsubst src/%.erl,ebin/%.beam,$(SRC))
 
 .PHONY: all test clean
 
-all: $(BEAM) bin/fatcc bin/fat
-
-ebin:
-	mkdir -p ebin
-
-ebin/%.beam: src/%.erl include/fat_image.hrl | ebin
-	$(ERLC) -I include -o ebin $<
-
-bin/fatcc bin/fat: bin/%
-	chmod +x $@
+all:
+	@mkdir -p ebin
+	@for f in src/*.erl; do \
+	  echo "ERLC $$f"; \
+	  $(ERLC) -I include -o ebin "$$f" || exit 1; \
+	done
+	@chmod +x bin/fatcc bin/fat
 
 test: all
 	./test/run.sh

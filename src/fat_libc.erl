@@ -1,0 +1,193 @@
+%% Built-in C standard library, implemented in Erlang.
+%%
+%% Symbols not defined in the loaded .fc image are looked up here by name at
+%% CALL time. The bundled headers in priv/include declare exactly these.
+-module(fat_libc).
+-include("fat_image.hrl").
+
+-export([exists/1, call/3, builtins/0]).
+
+builtins() ->
+    ["puts", "printf", "putchar", "getchar", "exit", "abort",
+     "atoi", "atol", "strtol", "abs", "labs",
+     "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strcat",
+     "strchr", "strrchr", "strstr", "strdup",
+     "memset", "memcpy", "memmove", "memcmp",
+     "malloc", "calloc", "realloc", "free",
+     "rand", "srand"].
+
+exists(Name) -> lists:member(Name, builtins()).
+
+%% Returns {Value, Vm} or {halt, ExitCode, Vm}.
+-spec call(string(), [term()], #vm{}) -> {term(), #vm{}} | {halt, integer(), #vm{}}.
+call("puts", [Addr], Vm) ->
+    S = fat_mem:read_cstr(Vm#vm.mem, Addr),
+    io:put_chars([S, $\n]),
+    {0, Vm};
+call("putchar", [C], Vm) ->
+    io:put_chars([C band 16#FF]),
+    {C band 16#FF, Vm};
+call("getchar", [], Vm) ->
+    {getchar(), Vm};
+call("printf", [FmtAddr | Args], Vm) ->
+    Fmt = fat_mem:read_cstr(Vm#vm.mem, FmtAddr),
+    {Out, _Rest, Vm1} = format(Fmt, Args, Vm, []),
+    io:put_chars(Out),
+    {iolist_size(Out), Vm1};
+call("exit", [Code], Vm) ->
+    {halt, Code band 16#FF, Vm};
+call("abort", [], Vm) ->
+    {halt, 134, Vm};
+call("atoi", [Addr], Vm) ->
+    {parse_int_cstr(Addr, Vm), Vm};
+call("atol", [Addr], Vm) ->
+    {parse_int_cstr(Addr, Vm), Vm};
+call("abs", [X], Vm) -> {abs(X), Vm};
+call("labs", [X], Vm) -> {abs(X), Vm};
+call("strlen", [Addr], Vm) ->
+    {byte_size(fat_mem:read_cstr(Vm#vm.mem, Addr)), Vm};
+call("strcmp", [A, B], Vm) ->
+    {strcmp(fat_mem:read_cstr(Vm#vm.mem, A), fat_mem:read_cstr(Vm#vm.mem, B)), Vm};
+call("strncmp", [A, B, N], Vm) ->
+    SA = fat_mem:read_bytes(Vm#vm.mem, A, N),
+    SB = fat_mem:read_bytes(Vm#vm.mem, B, N),
+    {strcmp(SA, SB), Vm};
+call("strcpy", [Dst, Src], Vm) ->
+    S = fat_mem:read_cstr(Vm#vm.mem, Src),
+    Vm1 = fat_mem:write_bytes(Vm#vm.mem, Dst, <<S/binary, 0>>),
+    {Dst, Vm#vm{mem = Vm1}};
+call("memset", [Dst, C, N], Vm) ->
+    Bin = binary:copy(<<(C band 16#FF)>>, N),
+    Vm1 = fat_mem:write_bytes(Vm#vm.mem, Dst, Bin),
+    {Dst, Vm#vm{mem = Vm1}};
+call("memcpy", [Dst, Src, N], Vm) ->
+    Bin = fat_mem:read_bytes(Vm#vm.mem, Src, N),
+    Vm1 = fat_mem:write_bytes(Vm#vm.mem, Dst, Bin),
+    {Dst, Vm#vm{mem = Vm1}};
+call("memmove", [Dst, Src, N], Vm) ->
+    Bin = fat_mem:read_bytes(Vm#vm.mem, Src, N),
+    Vm1 = fat_mem:write_bytes(Vm#vm.mem, Dst, Bin),
+    {Dst, Vm#vm{mem = Vm1}};
+call("memcmp", [A, B, N], Vm) ->
+    SA = fat_mem:read_bytes(Vm#vm.mem, A, N),
+    SB = fat_mem:read_bytes(Vm#vm.mem, B, N),
+    {strcmp(SA, SB), Vm};
+call("rand", [], Vm) ->
+    {rand:uniform(16#7FFFFFFF) - 1, Vm};
+call("srand", [_Seed], Vm) ->
+    {0, Vm};
+call(Name, _Args, _Vm) ->
+    error({unimplemented_builtin, Name}).
+
+%%====================================================================
+%% helpers
+%%====================================================================
+getchar() ->
+    case io:get_chars(standard_io, "", 1) of
+        eof -> -1;
+        [C] -> C;
+        _ -> -1
+    end.
+
+parse_int_cstr(Addr, Vm) ->
+    S = binary_to_list(fat_mem:read_cstr(Vm#vm.mem, Addr)),
+    parse_int(S).
+
+parse_int(S) ->
+    S1 = string:trim(S, leading),
+    {Sgn, Digits0} = case S1 of
+                         [$- | R1] -> {-1, R1};
+                         [$+ | R1] -> {1, R1};
+                         _ -> {1, S1}
+                     end,
+    Digits = lists:takewhile(fun(C) -> C >= $0 andalso C =< $9 end, Digits0),
+    case Digits of
+        [] -> 0;
+        _ -> Sgn * list_to_integer(Digits)
+    end.
+
+strcmp(A, B) ->
+    AL = binary_to_list(A), BL = binary_to_list(B),
+    cmp(AL, BL).
+cmp([], []) -> 0;
+cmp([], _) -> -1;
+cmp(_, []) -> 1;
+cmp([X | R1], [X | R2]) -> cmp(R1, R2);
+cmp([X | _], [Y | _]) -> if X < Y -> -1; true -> 1 end.
+
+%%====================================================================
+%% printf formatting
+%%====================================================================
+format(<<>>, Args, Vm, Acc) ->
+    {lists:reverse(Acc), Args, Vm};
+format(<<"%%", R/binary>>, Args, Vm, Acc) ->
+    format(R, Args, Vm, ["%" | Acc]);
+format(<<$%, R/binary>>, Args, Vm, Acc) ->
+    {Conv, Mods, R1} = take_conv(R, []),
+    case Args of
+        [A | As] ->
+            Str = apply_conv(Conv, Mods, A, Vm),
+            format(R1, As, Vm, [Str | Acc]);
+        [] ->
+            {lists:reverse(Acc), [], Vm}
+    end;
+format(<<C, R/binary>>, Args, Vm, Acc) ->
+    format(R, Args, Vm, [C | Acc]).
+
+take_conv(<<C, R/binary>>, Mods) ->
+    case is_conv(C) of
+        true -> {C, lists:reverse(Mods), R};
+        false -> take_conv(R, [C | Mods])
+    end.
+
+is_conv(C) -> lists:member(C, "diouxXcspfeEgGaA").
+
+apply_conv($d, Mods, A, _Vm) -> pad(integer_to_list(trunc(A)), Mods);
+apply_conv($i, Mods, A, _Vm) -> pad(integer_to_list(trunc(A)), Mods);
+apply_conv($u, Mods, A, _Vm) -> pad(integer_to_list(A band 16#FFFFFFFF), Mods);
+apply_conv($x, Mods, A, _Vm) -> pad(io_lib:format("~.16b", [A band 16#FFFFFFFF]), Mods);
+apply_conv($X, Mods, A, _Vm) ->
+    pad(string:uppercase(io_lib:format("~.16b", [A band 16#FFFFFFFF])), Mods);
+apply_conv($o, Mods, A, _Vm) -> pad(io_lib:format("~.8b", [A band 16#FFFFFFFF]), Mods);
+apply_conv($c, _Mods, A, _Vm) -> [A band 16#FF];
+apply_conv($s, Mods, Addr, Vm) ->
+    case Addr of
+        0 -> pad("(null)", Mods);
+        _ -> pad(fat_mem:read_cstr(Vm#vm.mem, Addr), Mods)
+    end;
+apply_conv($p, _Mods, Addr, _Vm) ->
+    io_lib:format("0x~.16b", [Addr]);
+apply_conv($f, _Mods, A, _Vm) -> io_lib:format("~.6f", [to_float(A)]);
+apply_conv($e, _Mods, A, _Vm) -> io_lib:format("~.6e", [to_float(A)]);
+apply_conv($g, _Mods, A, _Vm) -> io_lib:format("~p", [to_float(A)]);
+apply_conv(_C, _Mods, A, _Vm) -> io_lib:format("~p", [A]).
+
+to_float(A) when is_float(A) -> A;
+to_float(A) when is_integer(A) -> float(A).
+
+%% Very small width/left-align support; precision and other flags ignored.
+pad(Str, Mods) ->
+    Width = width_of(Mods),
+    Left = lists:member($-, Mods),
+    Flat = to_flat_list(Str),
+    Len = length(Flat),
+    case Width > Len of
+        false -> Flat;
+        true when Left -> Flat ++ lists:duplicate(Width - Len, $\s);
+        true -> lists:duplicate(Width - Len, $\s) ++ Flat
+    end.
+
+to_flat_list(B) when is_binary(B) ->
+    binary_to_list(B);
+to_flat_list(L) when is_list(L) ->
+    lists:flatten([to_flat_list(X) || X <- L]);
+to_flat_list(I) when is_integer(I) ->
+    [I];
+to_flat_list(Other) ->
+    lists:flatten(io_lib:format("~p", [Other])).
+
+width_of(Mods) -> width_of(Mods, 0, false).
+width_of([C | R], Acc, _Seen) when C >= $0, C =< $9 ->
+    width_of(R, Acc * 10 + (C - $0), true);
+width_of([_ | R], Acc, Seen) -> width_of(R, Acc, Seen);
+width_of([], Acc, _Seen) -> Acc.
