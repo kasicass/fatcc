@@ -219,11 +219,14 @@ string_lit(<<C, R/binary>>, Acc, N) ->
 
 char_lit(<<$\\, R/binary>>, _Loc) ->
     {Byte, R2} = escape(R),
-    {Byte, R2, 1 + consumed_escape(R)};
+    {Byte, skip_quote(R2), 1 + consumed_escape(R)};
 char_lit(<<C, R/binary>>, _Loc) ->
-    {C, R, 1};
+    {C, skip_quote(R), 1};
 char_lit(<<>>, _Loc) ->
     {0, <<>>, 0}.
+
+skip_quote(<<$', R/binary>>) -> R;
+skip_quote(R) -> R.
 
 %% number of source characters consumed by an escape (best effort for cols)
 consumed_escape(Bin) -> consumed_escape(Bin, 0).

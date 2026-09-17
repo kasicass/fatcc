@@ -32,8 +32,12 @@ size({ptr, _})  -> 8;
 size({array, T, N}) when erlang:is_integer(N), N >= 0 -> size(T) * N;
 size({array, _, _}) -> 0;
 size({func, _, _, _}) -> 0;
+size({struct, _, Members}) -> struct_size(Members);
+size({union, _, Members}) -> union_size(Members);
 size({struct, _, Members, _}) -> struct_size(Members);
 size({union, _, Members, _}) -> union_size(Members);
+size({struct, _}) -> 0;
+size({union, _}) -> 0;
 size({enum, _, _}) -> 4;
 size(_) -> 8.
 
@@ -52,8 +56,12 @@ union_size(Members) ->
 
 align(void) -> 1;
 align({array, T, _}) -> align(T);
+align({struct, _, Members}) -> struct_align(Members);
+align({union, _, Members}) -> struct_align(Members);
 align({struct, _, Members, _}) -> struct_align(Members);
 align({union, _, Members, _}) -> struct_align(Members);
+align({struct, _}) -> 1;
+align({union, _}) -> 1;
 align({func, _, _, _}) -> 1;
 align(T) -> min(max(size(T), 1), 8).
 

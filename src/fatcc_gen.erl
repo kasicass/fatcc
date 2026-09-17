@@ -191,7 +191,10 @@ gen_stmt({var, Type0, Name, Init}, G0) ->
         {str, B} when is_tuple(Type), element(1, Type) =:= array ->
             {[{store_bytes_local, Off, pad_bin(B, fatcc_type:size(Type))}], void, G1};
         {init_list, Items} ->
-            gen_array_init(Type, Off, Items, G1);
+            case is_struct_type(Type) of
+                true -> gen_struct_init(Type, Off, Items, G1);
+                false -> gen_array_init(Type, Off, Items, G1)
+            end;
         _ ->
             {I, _T, G2} = gen_expr(Init, G1),
             {I ++ [{store_local, Off, fatcc_type:size(Type)}], void, G2}
@@ -301,6 +304,37 @@ gen_array_rest([], _Off, _ES, G, Acc) ->
 gen_array_rest([E | R], Off, ES, G, Acc) ->
     {I, _T, _} = gen_expr(E, G),
     gen_array_rest(R, Off + ES, ES, G, [I ++ [{store_local, Off, ES}] | Acc]).
+
+is_struct_type({struct, _, _}) -> true;
+is_struct_type({struct, _, _, _}) -> true;
+is_struct_type({union, _, _}) -> true;
+is_struct_type({union, _, _, _}) -> true;
+is_struct_type(_) -> false.
+
+gen_struct_init(Type, Off, Items, G) ->
+    Members = struct_members(Type),
+    gen_struct_fields(zip(Items, Members), Type, Off, G, []).
+
+gen_struct_fields([], _Type, _Off, _G, Acc) ->
+    {lists:append(lists:reverse(Acc)), void, _G};
+gen_struct_fields([{Item, {MName, MType, _Bits}} | R], Type, Off, G, Acc) ->
+    FOff = Off + field_offset(Type, struct_members(Type), MName),
+    I = case {Item, is_struct_type(MType)} of
+            {{init_list, Sub}, true} ->
+                {IS, _, _} = gen_struct_init(MType, FOff, Sub, G),
+                IS;
+            {{init_list, Sub}, false} ->
+                {IS, _, _} = gen_array_init(MType, FOff, Sub, G),
+                IS;
+            _ ->
+                {IE, _T, _} = gen_expr(Item, G),
+                IE ++ [{store_local, FOff, max(fatcc_type:size(MType), 1)}]
+        end,
+    gen_struct_fields(R, Type, Off, G, [I | Acc]).
+
+zip([], _) -> [];
+zip(_, []) -> [];
+zip([A | As], [B | Bs]) -> [{A, B} | zip(As, Bs)].
 
 %%====================================================================
 %% Local allocation
@@ -425,7 +459,12 @@ gen_expr({addr, E}, G0) ->
     {IA, {ptr, TA}, G1};
 gen_expr({member, E, Name, Arrow}, G0) ->
     {IA, T, G1} = gen_member_addr(E, Name, Arrow, G0),
-    {IA ++ [{load, fatcc_type:size(T), fatcc_type:sign_of(T)}], T, G1};
+    case is_array_or_func(T) of
+        true ->
+            {IA, {ptr, fatcc_type:base(T)}, G1};
+        false ->
+            {IA ++ [{load, fatcc_type:size(T), fatcc_type:sign_of(T)}], T, G1}
+    end;
 gen_expr({cast, Type, E}, G0) ->
     {I, T, G1} = gen_expr(E, G0),
     {I ++ conversion(T, Type), Type, G1};

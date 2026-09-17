@@ -14,6 +14,7 @@
 parse(Toks0) ->
     Toks = ensure_eof(Toks0),
     put(fatcc_typedefs, #{}),
+    put(fatcc_enum, #{}),
     try
         {Items, Rest} = parse_items(Toks, []),
         case Rest of
@@ -239,7 +240,10 @@ parse_struct_or_union(Kind, Toks) ->
             erlang:put({fatcc_tag, {Kind, Tag}}, Members),
             {{Kind, Tag, Members}, R2};
         _ ->
-            {{Kind, Tag}, T1}
+            case erlang:get({fatcc_tag, {Kind, Tag}}) of
+                undefined -> {{Kind, Tag}, T1};
+                Members -> {{Kind, Tag, Members}, T1}
+            end
     end.
 
 parse_members([{punct, '}', _} | R], Acc) ->
@@ -273,31 +277,35 @@ parse_enum(Toks) ->
                 end,
     case T1 of
         [{punct, '{', _} | R1] ->
-            _ = parse_enumerators(R1, 0),
-            {{enum, Tag}, skip_to_brace_close(R1)};
+            {Vals, R2} = parse_enumerators(R1, 0),
+            lists:foreach(
+              fun({Name, Value}) ->
+                  erlang:put({fatcc_enum, Name}, Value)
+              end, Vals),
+            {{enum, Tag}, R2};
         _ ->
             {{enum, Tag}, T1}
     end.
 
-parse_enumerators([{punct, '}', _} | _] = Toks, _V) -> Toks;
-parse_enumerators([{id, _N, _} | R], V) ->
-    case R of
-        [{punct, '=', _} | R1] -> parse_enumerator_init(R1);
-        _ -> skip_to_comma_or_close(R, V)
-    end.
-
-parse_enumerator_init(Toks) ->
-    {_E, R} = parse_assign(Toks),
-    skip_to_comma_or_close(R, 0).
-
-skip_to_comma_or_close([{punct, ',', _} | R], V) -> skip_to_comma_or_close(R, V);
-skip_to_comma_or_close([{punct, '}', _} | _] = T, _V) -> T;
-skip_to_comma_or_close([_ | R], V) -> skip_to_comma_or_close(R, V);
-skip_to_comma_or_close([], V) -> error({unterminated_enum, V}).
-
-skip_to_brace_close([{punct, '}', _} | R]) -> R;
-skip_to_brace_close([_ | R]) -> skip_to_brace_close(R);
-skip_to_brace_close([]) -> [].
+parse_enumerators([{punct, '}', _} | R], _V) ->
+    {[], R};
+parse_enumerators([{id, Name, _} | R], V) ->
+    {Val, R1} = case R of
+                    [{punct, '=', _} | RE] ->
+                        {E, RR} = parse_assign(RE),
+                        {const_int(E), RR};
+                    _ ->
+                        {V, R}
+                end,
+    {Rest, R2} = case R1 of
+                     [{punct, ',', _} | Rc] -> parse_enumerators(Rc, Val + 1);
+                     [{punct, '}', _} | Rc] -> {[], Rc};
+                     [T | _] -> err(tloc(T), "expected ',' or '}' in enum", []);
+                     [] -> err({1, 1}, "unterminated enum", [])
+                 end,
+    {[{Name, Val} | Rest], R2};
+parse_enumerators([T | _], _V) ->
+    err(tloc(T), "expected enumerator name", []).
 
 %%====================================================================
 %% Declarators
@@ -772,7 +780,11 @@ parse_primary([{int, V, _} | R]) -> {{int, V}, R};
 parse_primary([{float, F, _} | R]) -> {{float, F}, R};
 parse_primary([{char, V, _} | R]) -> {{char, V}, R};
 parse_primary([{str, B, _} | R]) -> parse_strings(R, B);
-parse_primary([{id, Name, _} | R]) -> {{id, Name}, R};
+parse_primary([{id, Name, _} | R]) ->
+    case erlang:get({fatcc_enum, Name}) of
+        undefined -> {{id, Name}, R};
+        Value -> {{int, Value}, R}
+    end;
 parse_primary([{punct, '(', _} | R]) ->
     {E, R1} = parse_expr(R),
     {E, expect_punct(')', R1)};
