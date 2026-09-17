@@ -519,18 +519,19 @@ parse_stmt([{kw, do, _} | R]) ->
 parse_stmt([{kw, for, _} | R]) ->
     R1 = expect_punct('(', R),
     {Init, R2} = parse_for_init(R1),
-    {Cond, R3} = case R2 of
+    R3 = expect_punct(';', R2),
+    {Cond, R4} = case R3 of
                      [{punct, ';', _} | Rx] -> {none, Rx};
-                     _ -> parse_expr(R2)
+                     _ -> parse_expr(R3)
                  end,
-    R4 = expect_punct(';', R3),
-    {Step, R5} = case R4 of
-                     [{punct, ')', _} | _] -> {none, R4};
-                     _ -> parse_expr(R4)
+    R5 = expect_punct(';', R4),
+    {Step, R6} = case R5 of
+                     [{punct, ')', _} | _] -> {none, R5};
+                     _ -> parse_expr(R5)
                  end,
-    R6 = expect_punct(')', R5),
-    {Body, R7} = parse_stmt(R6),
-    {{for, Init, Cond, Step, Body}, R7};
+    R7 = expect_punct(')', R6),
+    {Body, R8} = parse_stmt(R7),
+    {{for, Init, Cond, Step, Body}, R8};
 parse_stmt([{kw, break, _} | R]) -> {{break}, expect_punct(';', R)};
 parse_stmt([{kw, continue, _} | R]) -> {{continue}, expect_punct(';', R)};
 parse_stmt([{kw, goto, _} | R]) ->
