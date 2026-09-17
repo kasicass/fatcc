@@ -2,7 +2,7 @@
 -module(fat_vm).
 -include("fat_image.hrl").
 
--export([run/2]).
+-export([run/2, call_function/3]).
 
 -define(MASK64, 16#FFFFFFFFFFFFFFFF).
 
@@ -243,6 +243,8 @@ do_ret(Vm, Val) ->
                        _ -> Val band 16#FF
                    end,
             Vm#vm{halted = true, exit_code = Code};
+        [#frame{ret_code = {callback}} | _] ->
+            throw({callback_return, Val, Vm});
         [Frame | Rest] ->
             Stack = case Val of
                         novalue -> Frame#frame.ret_stack;
@@ -300,6 +302,33 @@ take(N, [H | T]) ->
 
 fault(Reason, Vm) ->
     throw({fat_fault, Reason, Vm}).
+
+%%====================================================================
+%% Re-entrant calls (used by libc callbacks such as qsort's comparator)
+%%====================================================================
+-spec call_function(#vm{}, non_neg_integer(), [term()]) -> {term(), #vm{}}.
+call_function(Vm0, Addr, Args) ->
+    Name = case Addr of
+               {funcptr, N} -> N;
+               A when is_integer(A) -> maps:get(A, Vm0#vm.func_by_addr, undefined)
+           end,
+    case Name of
+        undefined ->
+            error({bad_function_pointer, Addr});
+        _ ->
+            F = maps:get(Name, Vm0#vm.funcs),
+            Saved = {Vm0#vm.code, Vm0#vm.pc, Vm0#vm.stack,
+                     Vm0#vm.frames, Vm0#vm.fp, Vm0#vm.sp},
+            Vm1 = enter(Vm0, F, Args, [], {callback}, 0, Vm0#vm.fp),
+            try loop(Vm1) of
+                _ -> error(callback_did_not_return)
+            catch
+                throw:{callback_return, Val, Vm2} ->
+                    {Code, Pc, Stack, Frames, Fp, Sp} = Saved,
+                    {Val, Vm2#vm{code = Code, pc = Pc, stack = Stack,
+                                 frames = Frames, fp = Fp, sp = Sp}}
+            end
+    end.
 
 %%====================================================================
 %% argv construction

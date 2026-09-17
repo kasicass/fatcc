@@ -14,7 +14,7 @@ builtins() ->
      "strchr", "strrchr", "strstr", "strdup",
      "memset", "memcpy", "memmove", "memcmp", "memchr",
      "malloc", "calloc", "realloc", "free",
-     "rand", "srand",
+     "rand", "srand", "qsort", "bsearch",
      "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower",
      "isprint", "ispunct", "isxdigit", "toupper", "tolower",
      "sqrt", "pow", "fabs", "sin", "cos", "tan", "floor", "ceil",
@@ -106,6 +106,11 @@ call("realloc", [Ptr, Size], Vm) ->
     {NewP, Vm1#vm{mem = Mem2}};
 call("free", [_Ptr], Vm) ->
     {0, Vm};
+call("qsort", [Base, N, Size, Cmp], Vm0) ->
+    Vm1 = qsort_insert(Vm0, Base, N, Size, Cmp, 1),
+    {0, Vm1};
+call("bsearch", [Key, Base, N, Size, Cmp], Vm0) ->
+    bsearch_loop(Vm0, Key, Base, N, Size, Cmp);
 call("memchr", [Addr, C, N], Vm) ->
     Bin = fat_mem:read_bytes(Vm#vm.mem, Addr, N),
     {memchr(Bin, C band 16#FF, Addr), Vm};
@@ -264,6 +269,65 @@ memchr(Bin, C, Addr) ->
 memchr_list([], _C, _Addr) -> 0;
 memchr_list([C | _], C, Addr) -> Addr;
 memchr_list([_ | R], C, Addr) -> memchr_list(R, C, Addr + 1).
+
+%%--------------------------------------------------------------------
+%% qsort / bsearch via re-entrant VM callbacks
+%%--------------------------------------------------------------------
+qsort_insert(Vm, _Base, N, _Size, _Cmp, I) when I >= N ->
+    Vm;
+qsort_insert(Vm0, Base, N, Size, Cmp, I) ->
+    Vm1 = insert_elem(Vm0, Base, Size, Cmp, I),
+    qsort_insert(Vm1, Base, N, Size, Cmp, I + 1).
+
+insert_elem(Vm, _Base, _Size, _Cmp, 0) ->
+    Vm;
+insert_elem(Vm0, Base, Size, Cmp, J) ->
+    {Order, Vm1} = cmp_elems(Vm0, Base, Size, Cmp, J, J - 1),
+    case Order < 0 of
+        true ->
+            Vm2 = swap_elems(Vm1, Base, Size, J, J - 1),
+            insert_elem(Vm2, Base, Size, Cmp, J - 1);
+        false ->
+            Vm1
+    end.
+
+cmp_elems(Vm0, Base, Size, Cmp, I, J) ->
+    A = fat_mem:read_bytes(Vm0#vm.mem, Base + I * Size, Size),
+    B = fat_mem:read_bytes(Vm0#vm.mem, Base + J * Size, Size),
+    {AP, Vm1} = alloc_scratch(Vm0, A),
+    {BP, Vm2} = alloc_scratch(Vm1, B),
+    {Val, Vm3} = fat_vm:call_function(Vm2, Cmp, [AP, BP]),
+    {Val, Vm3}.
+
+alloc_scratch(Vm, Bin) ->
+    Addr = (Vm#vm.heap_top + 7) band (bnot 7),
+    Mem = fat_mem:write_bytes(Vm#vm.mem, Addr, Bin),
+    {Addr, Vm#vm{mem = Mem, heap_top = Addr + max(byte_size(Bin), 1)}}.
+
+swap_elems(Vm, Base, Size, I, J) ->
+    AI = Base + I * Size,
+    AJ = Base + J * Size,
+    A = fat_mem:read_bytes(Vm#vm.mem, AI, Size),
+    B = fat_mem:read_bytes(Vm#vm.mem, AJ, Size),
+    Mem1 = fat_mem:write_bytes(Vm#vm.mem, AI, B),
+    Mem2 = fat_mem:write_bytes(Mem1, AJ, A),
+    Vm#vm{mem = Mem2}.
+
+bsearch_loop(Vm, _Key, _Base, 0, _Size, _Cmp) ->
+    {0, Vm};
+bsearch_loop(Vm0, Key, Base, N, Size, Cmp) ->
+    Mid = N div 2,
+    {Order, Vm1} = cmp_elems_key(Vm0, Key, Base, Size, Cmp, Mid),
+    if
+        Order =:= 0 -> {Base + Mid * Size, Vm1};
+        Order < 0 -> bsearch_loop(Vm1, Key, Base, Mid, Size, Cmp);
+        true -> bsearch_loop(Vm1, Key, Base + (Mid + 1) * Size, N - Mid - 1, Size, Cmp)
+    end.
+
+cmp_elems_key(Vm0, Key, Base, Size, Cmp, I) ->
+    {KP, Vm1} = alloc_scratch(Vm0, fat_mem:read_bytes(Vm0#vm.mem, Key, Size)),
+    {EP, Vm2} = alloc_scratch(Vm1, fat_mem:read_bytes(Vm1#vm.mem, Base + I * Size, Size)),
+    fat_vm:call_function(Vm2, Cmp, [KP, EP]).
 
 %%====================================================================
 %% printf formatting
