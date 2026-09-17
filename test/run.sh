@@ -51,6 +51,20 @@ for c in test/cases/*.c; do
     done
 done
 
+# separate compilation + linking
+COUNT=$((COUNT + 1))
+if ./bin/fatcc -c test/link/lib.c -o test/tmp/link_lib.fo >test/tmp/link.log 2>&1 \
+   && ./bin/fatcc -c test/link/main.c -o test/tmp/link_main.fo >>test/tmp/link.log 2>&1 \
+   && ./bin/fatcc test/tmp/link_lib.fo test/tmp/link_main.fo -o test/tmp/linked.fc >>test/tmp/link.log 2>&1 \
+   && ./bin/fat test/tmp/linked.fc >test/tmp/linked.actual 2>>test/tmp/link.log \
+   && diff -q test/expected/linked.out test/tmp/linked.actual >/dev/null; then
+    echo "PASS linked (separate compilation)"
+else
+    echo "FAIL linked (separate compilation)"
+    sed 's/^/    /' test/tmp/link.log
+    FAIL=1
+fi
+
 echo "----"
 echo "$COUNT test(s), $([ $FAIL -eq 0 ] && echo OK || echo FAILED)"
 exit $FAIL

@@ -14,6 +14,7 @@
     preprocess_only = false :: boolean(),
     emit_asm = false      :: boolean(),
     debug = false         :: boolean(),
+    compile_only = false  :: boolean(),
     opt = 0               :: non_neg_integer()
 }).
 
@@ -48,16 +49,56 @@ compile(Files, Opts) ->
             lists:foreach(fun(F) -> preprocess_only(F, PPOpts) end, Files),
             erlang:halt(0);
         false ->
-            Items = lists:append([compile_file(F, PPOpts) || F <- Files]),
-            {ok, Image} = fatcc_gen:gen(Items, #{opt_level => Opts#opts.opt}),
-            case Opts#opts.emit_asm of
-                true -> print_asm(Image), erlang:halt(0);
+            Images = [file_image(F, Opts, PPOpts) || F <- Files],
+            case Opts#opts.compile_only of
+                true ->
+                    write_objects(Files, Images, Opts),
+                    erlang:halt(0);
                 false ->
-                    Out = out_name(Opts, Files),
-                    ok = file:write_file(Out, fat_format:encode(Image)),
-                    io:format("fatcc: wrote ~s~n", [Out]),
-                    erlang:halt(0)
+                    {ok, Image} = fatcc_link:link(Images),
+                    case Opts#opts.emit_asm of
+                        true -> print_asm(Image), erlang:halt(0);
+                        false ->
+                            Out = out_name(Opts, Files),
+                            ok = file:write_file(Out, fat_format:encode(Image)),
+                            io:format("fatcc: wrote ~s~n", [Out]),
+                            erlang:halt(0)
+                    end
             end
+    end.
+
+file_image(F, Opts, PPOpts) ->
+    case filename:extension(F) of
+        ".fo" ->
+            case file:read_file(F) of
+                {ok, Bin} ->
+                    case fat_format:decode(Bin) of
+                        {ok, Image} -> Image;
+                        {error, Reason} ->
+                            throw({fatal, 1, io_lib:format("cannot read ~s: ~p", [F, Reason])})
+                    end;
+                {error, Reason} ->
+                    throw({fatal, 1, io_lib:format("cannot read ~s: ~p", [F, Reason])})
+            end;
+        _ ->
+            Items = compile_file(F, PPOpts),
+            {ok, Image} = fatcc_gen:gen(Items, #{opt_level => Opts#opts.opt}),
+            Image
+    end.
+
+write_objects(Files, Images, Opts) ->
+    case {Files, Opts#opts.out} of
+        {[F], Out} when Out =/= undefined ->
+            [Img] = Images,
+            ok = file:write_file(Out, fat_format:encode(Img)),
+            io:format("fatcc: wrote ~s~n", [Out]);
+        _ ->
+            lists:foreach(
+              fun({F, Img}) ->
+                  Out = filename:rootname(F) ++ ".fo",
+                  ok = file:write_file(Out, fat_format:encode(Img)),
+                  io:format("fatcc: wrote ~s~n", [Out])
+              end, lists:zip(Files, Images))
     end.
 
 compile_file(File, PPOpts) ->
@@ -131,6 +172,7 @@ parse_args(["-I", Dir | R], Opts) -> parse_args(R, Opts#opts{includes = Opts#opt
 parse_args(["-D", Def | R], Opts) ->
     parse_args(R, Opts#opts{defines = Opts#opts.defines ++ [split_define(Def)]});
 parse_args(["-E" | R], Opts) -> parse_args(R, Opts#opts{preprocess_only = true});
+parse_args(["-c" | R], Opts) -> parse_args(R, Opts#opts{compile_only = true});
 parse_args(["-S" | R], Opts) -> parse_args(R, Opts#opts{emit_asm = true});
 parse_args(["-g" | R], Opts) -> parse_args(R, Opts#opts{debug = true});
 parse_args(["-O0" | R], Opts) -> parse_args(R, Opts#opts{opt = 0});
@@ -178,6 +220,7 @@ usage() ->
       "  -o <file>        write output to <file>~n"
       "  -I <dir>         add include search directory~n"
       "  -D<name>[=val]   predefine macro~n"
+      "  -c               compile to .fo object~n"
       "  -E               preprocess only~n"
       "  -S               emit assembly listing~n"
       "  -g               emit debug info~n"
