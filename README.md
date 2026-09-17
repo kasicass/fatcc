@@ -49,3 +49,28 @@ priv/include/    bundled C standard headers
 test/            end-to-end tests
 doc/design.md    full design document
 ```
+
+## Implemented status
+
+Stages M0–M8 are implemented and covered by `test/run.sh` (each case is built
+at both `-O0` and `-O1`):
+
+- **Preprocessor**: line splicing, comment stripping, `#include` (quoted/angled,
+  user + bundled headers), object- and function-like `#define`, `#`/`##`,
+  `__VA_ARGS__`, `#if/#ifdef/#ifndef/#elif/#else/#endif`, `#undef`, `#pragma once`.
+- **Language**: `void _Bool char short int long float double`, signed/unsigned,
+  pointers, arrays, function pointers, `struct`/`union`/`enum`/`typedef`,
+  qualifiers; full operator set, `if/while/do/for/switch/goto/break/continue`.
+- **Libc**: `printf` family, string/memory functions, `malloc/calloc/realloc/free`,
+  `atoi/strtol`, `qsort/bsearch` (re-entrant callbacks), ctype and `math`.
+- **Backend**: stack bytecode, constant folding / peephole `-O1`, bytecode
+  **verifier**, `.fc` linked image and `.fo` relocatable objects, separate
+  linking (`fatcc -c` + `fatcc a.fo b.fo -o prog.fc`).
+- **Runtime**: `fat` CLI, paged-v0 sparse memory, `--trace`, `--max-steps`,
+  `--heap-size`, `--no-verify`.
+
+Known limitations (see `doc/design.md` §11): bit-fields are parsed but not laid
+out bit-exactly; structs are not passed/returned by value or assigned wholesale;
+user-defined `va_list`/`va_arg` is not implemented (variadic *calls* and libc
+`printf` work); `-g` debug info is accepted but not yet emitted; `.fc` uses a
+CRC-checked term envelope rather than the chunked format.
