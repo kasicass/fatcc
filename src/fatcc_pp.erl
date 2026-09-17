@@ -183,7 +183,7 @@ handle_directive("define", Arg, N, St) ->
 handle_directive("undef", Arg, _N, St) ->
     {Name, _} = split_word(Arg),
     {[], St#pp{macros = maps:remove(Name, St#pp.macros)}};
-handle_directive("pragma", Arg, _N, St) ->
+handle_directive("pragma", _Arg, _N, St) ->
     {[], St};
 handle_directive("error", Arg, N, _St) ->
     throw({pp_error, {N, 1}, io_lib:format("#error ~s", [Arg])});

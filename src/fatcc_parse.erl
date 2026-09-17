@@ -145,7 +145,7 @@ var_of(_) -> false.
 %%====================================================================
 parse_decl_specs(Toks) -> ds(Toks, none, []).
 
-ds([{kw, K, _} | R], Storage, Flags)
+ds([{kw, K, _} | R], _Storage, Flags)
   when K =:= typedef; K =:= extern; K =:= static; K =:= auto; K =:= register ->
     ds(R, K, Flags);
 ds([{kw, const, _} | R], Storage, Flags) -> ds(R, Storage, [const | Flags]);
@@ -211,8 +211,8 @@ resolve_arith(Flags) ->
     Chr = lists:member(char, Flags),
     Uns = lists:member(unsigned, Flags),
     Sgn = lists:member(signed, Flags),
-    Shorts = length([x || x <- Flags, x =:= short]),
-    Longs = length([x || x <- Flags, x =:= long]),
+    Shorts = count_atom(short, Flags),
+    Longs = count_atom(long, Flags),
     if
         Void -> void;
         Bool -> bool;
@@ -405,6 +405,10 @@ ci_bin('||', A, B) -> bool_i(A =/= 0 orelse B =/= 0).
 
 bool_i(true) -> 1;
 bool_i(false) -> 0.
+
+count_atom(_, []) -> 0;
+count_atom(A, [A | R]) -> 1 + count_atom(A, R);
+count_atom(A, [_ | R]) -> count_atom(A, R).
 
 is_qualifier_or_static([{kw, K, _} | _]) when K =:= const; K =:= volatile; K =:= restrict; K =:= static -> true;
 is_qualifier_or_static(_) -> false.

@@ -88,7 +88,7 @@ file_image(F, Opts, PPOpts) ->
 
 write_objects(Files, Images, Opts) ->
     case {Files, Opts#opts.out} of
-        {[F], Out} when Out =/= undefined ->
+        {[_], Out} when Out =/= undefined ->
             [Img] = Images,
             ok = file:write_file(Out, fat_format:encode(Img)),
             io:format("fatcc: wrote ~s~n", [Out]);

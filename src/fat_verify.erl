@@ -34,7 +34,7 @@ check_targets(Code, N, Name) ->
           end
       end, lists:seq(1, N)).
 
-check_target(T, N, Name, Pc) when is_integer(T), T >= 1, T =< N -> ok;
+check_target(T, N, _Name, _Pc) when is_integer(T), T >= 1, T =< N -> ok;
 check_target(T, _N, Name, Pc) ->
     throw({verify_error, {bad_jump_target, Name, Pc, T}}).
 

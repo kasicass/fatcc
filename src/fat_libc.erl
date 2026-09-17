@@ -398,7 +398,7 @@ precision_of([$. | R], Default, _Acc, _Seen) -> precision_of(R, Default, 0, true
 precision_of([C | R], Default, Acc, true) when C >= $0, C =< $9 ->
     precision_of(R, Default, Acc * 10 + (C - $0), true);
 precision_of([_ | R], Default, Acc, Seen) -> precision_of(R, Default, Acc, Seen);
-precision_of([], Default, Acc, true) -> Acc;
+precision_of([], _Default, Acc, true) -> Acc;
 precision_of([], Default, _Acc, false) -> Default.
 
 %% Very small width/left-align support; precision and other flags ignored.
