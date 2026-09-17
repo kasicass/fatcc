@@ -322,9 +322,8 @@ parse_declarator(Toks, Base) ->
                     {_, _, After} = parse_declarator(R, Dummy),
                     After1 = expect_punct(')', After),
                     {Ty1, After2} = type_suffix(After1, Base1),
-                    {Name, Ty2, After3} = parse_declarator(R, Ty1),
-                    After4 = expect_punct(')', After3),
-                    {Name, Ty2, After4}
+                    {Name, Ty2, _After3} = parse_declarator(R, Ty1),
+                    {Name, Ty2, After2}
             end;
         _ ->
             parse_name_and_suffix(T1, Base1)

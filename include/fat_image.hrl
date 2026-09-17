@@ -45,6 +45,8 @@
 %% Runtime VM state.
 -record(vm, {
     funcs = #{}           :: map(),
+    func_addrs = #{}      :: map(),        % name -> address
+    func_by_addr = #{}    :: map(),        % address -> name
     strings = #{}         :: map(),        % index -> address
     globals = #{}         :: map(),        % name -> address
     global_types = #{}    :: map(),        % name -> type

@@ -18,6 +18,7 @@
     frame = 0            :: non_neg_integer(),
     locals = []          :: list(),
     loops = []           :: list(),
+    brks = []            :: list(),
     lbl = 0              :: non_neg_integer()
 }).
 
@@ -255,8 +256,8 @@ gen_stmt({for, Init, Cond, Step, Body}, G0) ->
     {II ++ [{label, Lcond}] ++ CondCode ++ IB ++ [{label, Lstep}] ++ IS ++
      [{jmp, Lcond}, {label, Lend}], void, G7};
 gen_stmt({break}, G) ->
-    case G#g.loops of
-        [{Break, _} | _] -> {[{jmp, Break}], void, G};
+    case G#g.brks of
+        [Break | _] -> {[{jmp, Break}], void, G};
         [] -> error({break_outside_loop})
     end;
 gen_stmt({continue}, G) ->
@@ -264,19 +265,85 @@ gen_stmt({continue}, G) ->
         [{_, Cont} | _] -> {[{jmp, Cont}], void, G};
         [] -> error({continue_outside_loop})
     end;
-gen_stmt({goto, _Label}, _G) ->
-    error({unsupported, goto});
-gen_stmt({label, _Name, _Body}, _G) ->
-    error({unsupported, label});
-gen_stmt({switch, _E, _Body}, _G) ->
-    error({unsupported, switch});
+gen_stmt({goto, Label}, G) ->
+    {[{jmp, {name, "C_" ++ Label}}], void, G};
+gen_stmt({label, Name, Body}, G0) ->
+    {I, T, G1} = gen_stmt(Body, G0),
+    {[{label, {name, "C_" ++ Name}}] ++ I, T, G1};
+gen_stmt({switch, E, Body}, G0) ->
+    {LEnd, G1} = fresh(G0),
+    {TmpOff, G2} = alloc_temp(int, G1),
+    {IE, _T, G3} = gen_expr(E, G2),
+    Items = flatten_block(Body),
+    Flat = flatten_switch(Items),
+    {Cases, CaseMap, G4} = collect_cases(Flat, G3),
+    Dispatch = lists:append(
+        [[{load_local, TmpOff, 4, signed}, {push, V}, eq, {jnz, L}]
+         || {V, L} <- lists:reverse(Cases)]),
+    DefaultJmp = case maps:find(default, CaseMap) of
+                     {ok, LD} -> [{jmp, LD}];
+                     error -> []
+                 end,
+    {IBody, G5} = gen_switch_body(Flat, CaseMap, LEnd, G4),
+    {IE ++ [{store_local, TmpOff, 4}] ++ Dispatch ++ DefaultJmp ++ IBody ++ [{label, LEnd}],
+     void, G5};
 gen_stmt({'case', _V, _Body}, _G) ->
-    error({unsupported, 'case'});
+    error(case_outside_switch);
 gen_stmt({default, _Body}, _G) ->
-    error({unsupported, default}).
+    error(default_outside_switch).
+
+flatten_block({block, Items}) -> Items;
+flatten_block(S) -> [S].
+
+%% Turn consecutive/nested case labels into a flat stream.
+flatten_switch(Items) -> lists:reverse(flatten_switch(Items, [])).
+flatten_switch([], Acc) -> Acc;
+flatten_switch([{'case', V, S} | R], Acc) ->
+    flatten_switch([S | R], [{'case', V} | Acc]);
+flatten_switch([{default, S} | R], Acc) ->
+    flatten_switch([S | R], [default | Acc]);
+flatten_switch([S | R], Acc) ->
+    flatten_switch(R, [{stmt, S} | Acc]).
+
+collect_cases(Flat, G0) ->
+    lists:foldl(
+      fun({'case', V}, {Cases, Map, G}) ->
+              Val = const_eval(V),
+              {L, G1} = fresh_label(G, "case"),
+              {[{Val, L} | Cases], maps:put(Val, L, Map), G1};
+         (default, {Cases, Map, G}) ->
+              {L, G1} = fresh_label(G, "default"),
+              {Cases, maps:put(default, L, Map), G1};
+         (_, Acc) -> Acc
+      end, {[], #{}, G0}, Flat).
+
+gen_switch_body([], _Map, _LEnd, G) ->
+    {[], G};
+gen_switch_body([{'case', V} | R], Map, LEnd, G0) ->
+    L = maps:get(const_eval(V), Map),
+    {I2, G1} = gen_switch_body(R, Map, LEnd, G0),
+    {[{label, L}] ++ I2, G1};
+gen_switch_body([default | R], Map, LEnd, G0) ->
+    L = maps:get(default, Map),
+    {I2, G1} = gen_switch_body(R, Map, LEnd, G0),
+    {[{label, L}] ++ I2, G1};
+gen_switch_body([{stmt, S} | R], Map, LEnd, G0) ->
+    {I, _T, G1} = gen_stmt(S, G0#g{brks = [LEnd | G0#g.brks]}),
+    {I2, G2} = gen_switch_body(R, Map, LEnd, G1),
+    {I ++ I2, G2}.
+
+alloc_temp(Type, G) ->
+    Off = G#g.frame,
+    Sz = slot_size(Type),
+    {Off, G#g{frame = Off + Sz}}.
+
+fresh_label(G, Prefix) ->
+    N = G#g.lbl,
+    {[Prefix, "_", integer_to_list(N)], G#g{lbl = N + 1}}.
 
 gen_loop_body(Body, Break, Cont, G) ->
-    gen_stmt(Body, G#g{loops = [{Break, Cont} | G#g.loops]}).
+    gen_stmt(Body, G#g{loops = [{Break, Cont} | G#g.loops],
+                       brks = [Break | G#g.brks]}).
 
 gen_for_init(none, G) -> {[], G};
 gen_for_init({decls, Decls}, G) ->
@@ -421,12 +488,19 @@ gen_expr({un, '!', E}, G0) ->
     {I, _T, G1} = gen_expr(E, G0),
     {I ++ [lnot_], int, G1};
 gen_expr({call, {id, Name}, Args}, G0) ->
-    {ArgI, _ArgTypes, G1} = gen_args(Args, G0),
-    Ret = case maps:find(Name, G1#g.protos) of
-              {ok, {R, _P, _V}} -> R;
-              error -> int
-          end,
-    {ArgI ++ [{call, Name, length(Args)}], Ret, G1};
+    case maps:is_key(Name, G0#g.scope) orelse maps:is_key(Name, G0#g.globals) of
+        true ->
+            {IF, _FT, G1} = gen_expr({id, Name}, G0),
+            {ArgI, _ArgTypes, G2} = gen_args(Args, G1),
+            {IF ++ ArgI ++ [{call_indirect, length(Args)}], int, G2};
+        false ->
+            {ArgI, _ArgTypes, G1} = gen_args(Args, G0),
+            Ret = case maps:find(Name, G1#g.protos) of
+                      {ok, {R, _P, _V}} -> R;
+                      error -> int
+                  end,
+            {ArgI ++ [{call, Name, length(Args)}], Ret, G1}
+    end;
 gen_expr({call, F, Args}, G0) ->
     {IF, _FT, G1} = gen_expr(F, G0),
     {ArgI, _ArgTypes, G2} = gen_args(Args, G1),

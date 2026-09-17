@@ -57,7 +57,8 @@ exec({push_str, Idx}, Vm) ->
     Addr = maps:get(Idx, Vm#vm.strings),
     bump(Vm#vm{stack = [Addr | Vm#vm.stack]});
 exec({push_func, Name}, Vm) ->
-    bump(Vm#vm{stack = [{funcptr, Name} | Vm#vm.stack]});
+    Addr = maps:get(Name, Vm#vm.func_addrs),
+    bump(Vm#vm{stack = [Addr | Vm#vm.stack]});
 exec({push_global_addr, Name}, Vm) ->
     Addr = maps:get(Name, Vm#vm.globals),
     bump(Vm#vm{stack = [Addr | Vm#vm.stack]});
@@ -170,14 +171,18 @@ exec({call, Name, Argc}, Vm) ->
 exec({call_indirect, Argc}, Vm) ->
     {Args, Rest1} = pop_args(Argc, Vm#vm.stack),
     [FPtr | Rest] = Rest1,
-    case FPtr of
-        {funcptr, Name} ->
+    Name = case FPtr of
+               {funcptr, N} -> N;
+               A when is_integer(A) -> maps:get(A, Vm#vm.func_by_addr, undefined)
+           end,
+    case Name of
+        undefined ->
+            fault({bad_function_pointer, FPtr}, Vm);
+        _ ->
             case maps:find(Name, Vm#vm.funcs) of
                 {ok, F} -> enter(Vm, F, Args, Rest, Vm#vm.code, Vm#vm.pc + 1, Vm#vm.fp);
                 error -> call_builtin(Name, Args, Rest, Vm)
-            end;
-        _ ->
-            fault({bad_function_pointer, FPtr}, Vm)
+            end
     end;
 exec({ret}, Vm) ->
     [Val | _] = Vm#vm.stack,

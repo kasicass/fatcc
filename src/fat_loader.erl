@@ -28,8 +28,11 @@ init_vm(#image{} = Image, Opts) ->
     Mem0 = fat_mem:new(),
     {Mem1, StrMap, AfterStrings} = write_strings(Image#image.strings, ?RODATA_BASE, 0, #{}, Mem0),
     {Mem2, GlobMap, _} = write_globals(Image#image.globals, max(AfterStrings, ?GLOBAL_BASE), #{}, StrMap, Mem1),
+    {FuncAddrs, FuncByAddr} = assign_func_addrs(maps:keys(Image#image.funcs), 16#00040000, #{}, #{}),
     #vm{
         funcs = Image#image.funcs,
+        func_addrs = FuncAddrs,
+        func_by_addr = FuncByAddr,
         strings = StrMap,
         globals = GlobMap,
         global_types = maps:map(fun(_K, G) -> G#global.type end, Image#image.globals),
@@ -62,3 +65,10 @@ write_global_init(Mem, Addr, Bin, _StrMap) when is_binary(Bin) ->
     fat_mem:write_bytes(Mem, Addr, Bin);
 write_global_init(Mem, Addr, {str_addr, Idx}, StrMap) ->
     fat_mem:write(Mem, Addr, 8, maps:get(Idx, StrMap)).
+
+assign_func_addrs([], _Addr, ByName, ByAddr) ->
+    {ByName, ByAddr};
+assign_func_addrs([Name | R], Addr, ByName, ByAddr) ->
+    assign_func_addrs(R, Addr + 16,
+                      maps:put(Name, Addr, ByName),
+                      maps:put(Addr, Name, ByAddr)).
