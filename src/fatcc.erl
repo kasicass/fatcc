@@ -13,7 +13,8 @@
     files = []            :: [string()],
     preprocess_only = false :: boolean(),
     emit_asm = false      :: boolean(),
-    debug = false         :: boolean()
+    debug = false         :: boolean(),
+    opt = 0               :: non_neg_integer()
 }).
 
 %%====================================================================
@@ -48,7 +49,7 @@ compile(Files, Opts) ->
             erlang:halt(0);
         false ->
             Items = lists:append([compile_file(F, PPOpts) || F <- Files]),
-            {ok, Image} = fatcc_gen:gen(Items),
+            {ok, Image} = fatcc_gen:gen(Items, #{opt_level => Opts#opts.opt}),
             case Opts#opts.emit_asm of
                 true -> print_asm(Image), erlang:halt(0);
                 false ->
@@ -132,6 +133,10 @@ parse_args(["-D", Def | R], Opts) ->
 parse_args(["-E" | R], Opts) -> parse_args(R, Opts#opts{preprocess_only = true});
 parse_args(["-S" | R], Opts) -> parse_args(R, Opts#opts{emit_asm = true});
 parse_args(["-g" | R], Opts) -> parse_args(R, Opts#opts{debug = true});
+parse_args(["-O0" | R], Opts) -> parse_args(R, Opts#opts{opt = 0});
+parse_args(["-O1" | R], Opts) -> parse_args(R, Opts#opts{opt = 1});
+parse_args(["-O2" | R], Opts) -> parse_args(R, Opts#opts{opt = 2});
+parse_args(["-O" | R], Opts) -> parse_args(R, Opts#opts{opt = 1});
 parse_args(["-O" ++ _ | R], Opts) -> parse_args(R, Opts);
 parse_args(["-W" ++ _ | R], Opts) -> parse_args(R, Opts);
 parse_args(["-std=" ++ _ | R], Opts) -> parse_args(R, Opts);

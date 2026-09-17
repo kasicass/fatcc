@@ -174,9 +174,13 @@ unsigned_of(T) ->
     end.
 
 sign_of(T) ->
-    case is_signed(T) of
-        true -> signed;
-        false -> unsigned
+    case is_float(T) of
+        true -> float;
+        false ->
+            case is_signed(T) of
+                true -> signed;
+                false -> unsigned
+            end
     end.
 
 %%--------------------------------------------------------------------

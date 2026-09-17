@@ -14,9 +14,12 @@
 
 new() -> #{}.
 
--spec read(mem(), non_neg_integer(), non_neg_integer(), signed | unsigned) ->
-          {integer(), mem()}.
+-spec read(mem(), non_neg_integer(), non_neg_integer(), signed | unsigned | float) ->
+          {integer() | float(), mem()}.
 read(Mem, _Addr, 0, _Sign) -> {0, Mem};
+read(Mem, Addr, Size, float) ->
+    Bin = read_bytes(Mem, Addr, Size),
+    {decode_float(Bin, Size), Mem};
 read(Mem, Addr, Size, Sign) ->
     Bytes = [maps:get(Addr + I, Mem, 0) || I <- lists:seq(0, Size - 1)],
     V0 = bytes_to_int(Bytes),
@@ -26,13 +29,29 @@ read(Mem, Addr, Size, Sign) ->
         end,
     {V, Mem}.
 
--spec write(mem(), non_neg_integer(), non_neg_integer(), integer()) -> mem().
+decode_float(Bin, 4) ->
+    <<F:32/float-little>> = Bin,
+    F;
+decode_float(Bin, 8) ->
+    <<F:64/float-little>> = Bin,
+    F;
+decode_float(Bin, Size) ->
+    <<F:Size/unit:8>> = Bin,
+    float(F).
+
+-spec write(mem(), non_neg_integer(), non_neg_integer(), integer() | float()) -> mem().
 write(Mem, _Addr, 0, _V) -> Mem;
+write(Mem, Addr, Size, V) when is_float(V) ->
+    write_bytes(Mem, Addr, encode_float(V, Size));
 write(Mem, Addr, Size, V) ->
     Bytes = int_to_bytes(V, Size),
     lists:foldl(
       fun({I, B}, M) -> maps:put(Addr + I, B band 16#FF, M) end,
       Mem, lists:zip(lists:seq(0, Size - 1), Bytes)).
+
+encode_float(F, 4) -> <<F:32/float-little>>;
+encode_float(F, 8) -> <<F:64/float-little>>;
+encode_float(F, Size) -> <<F:Size/unit:8>>.
 
 -spec read_bytes(mem(), non_neg_integer(), non_neg_integer()) -> binary().
 read_bytes(Mem, Addr, N) ->

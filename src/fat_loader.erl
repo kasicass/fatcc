@@ -18,17 +18,32 @@ load(Path) ->
 start(Path, Args, Opts) ->
     case load(Path) of
         {ok, Image} ->
-            Vm = init_vm(Image, Opts),
-            fat_vm:run(Vm, Args);
+            case maps:get(verify, Opts, true) of
+                true ->
+                    case fat_verify:verify(Image) of
+                        ok -> run_image(Image, Args, Opts);
+                        {error, Reason} -> {error, {verify, Reason}}
+                    end;
+                false ->
+                    run_image(Image, Args, Opts)
+            end;
         {error, Reason} ->
             {error, Reason}
     end.
+
+run_image(Image, Args, Opts) ->
+    Vm = init_vm(Image, Opts),
+    fat_vm:run(Vm, Args).
 
 init_vm(#image{} = Image, Opts) ->
     Mem0 = fat_mem:new(),
     {Mem1, StrMap, AfterStrings} = write_strings(Image#image.strings, ?RODATA_BASE, 0, #{}, Mem0),
     {Mem2, GlobMap, _} = write_globals(Image#image.globals, max(AfterStrings, ?GLOBAL_BASE), #{}, StrMap, Mem1),
     {FuncAddrs, FuncByAddr} = assign_func_addrs(maps:keys(Image#image.funcs), 16#00040000, #{}, #{}),
+    HeapEnd = case maps:get(heap_size, Opts, undefined) of
+                  undefined -> 16#0FFFFFFF;
+                  N -> 16#00100000 + N
+              end,
     #vm{
         funcs = Image#image.funcs,
         func_addrs = FuncAddrs,
@@ -39,6 +54,7 @@ init_vm(#image{} = Image, Opts) ->
         entry = Image#image.entry,
         mem = Mem2,
         heap_top = ?HEAP_BASE,
+        heap_end = HeapEnd,
         stack_top = ?STACK_TOP,
         sp = ?STACK_TOP,
         fp = ?STACK_TOP,

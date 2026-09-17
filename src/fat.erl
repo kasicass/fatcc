@@ -90,6 +90,12 @@ parse_args(["--max-steps", N | R], Opts, File, Acc) ->
     parse_args(R, maps:put(max_steps, list_to_integer(N), Opts), File, Acc);
 parse_args(["--max-steps=" ++ N | R], Opts, File, Acc) ->
     parse_args(R, maps:put(max_steps, list_to_integer(N), Opts), File, Acc);
+parse_args(["--heap-size", N | R], Opts, File, Acc) ->
+    parse_args(R, maps:put(heap_size, list_to_integer(N), Opts), File, Acc);
+parse_args(["--heap-size=" ++ N | R], Opts, File, Acc) ->
+    parse_args(R, maps:put(heap_size, list_to_integer(N), Opts), File, Acc);
+parse_args(["--no-verify" | R], Opts, File, Acc) ->
+    parse_args(R, maps:put(verify, false, Opts), File, Acc);
 parse_args(["--" | R], Opts, File, Acc) ->
     {Opts, File, lists:reverse(Acc) ++ R};
 parse_args(["-" ++ _ = Flag | _], _, _, _) ->
@@ -105,6 +111,8 @@ usage() ->
       "usage: fat [options] prog.fc [program args...]~n"
       "  --trace            trace instructions~n"
       "  --max-steps N      instruction budget~n"
+      "  --heap-size N      heap limit in bytes~n"
+      "  --no-verify        skip bytecode verification~n"
       "  --dump             dump the loaded image~n"
       "  --version          print version~n"
       "  --help             print this help~n").

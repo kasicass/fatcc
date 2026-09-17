@@ -5,7 +5,7 @@
 -module(fatcc_gen).
 -include("fat_image.hrl").
 
--export([gen/1]).
+-export([gen/1, gen/2]).
 
 -record(g, {
     funcs = #{}          :: map(),
@@ -19,7 +19,8 @@
     locals = []          :: list(),
     loops = []           :: list(),
     brks = []            :: list(),
-    lbl = 0              :: non_neg_integer()
+    lbl = 0              :: non_neg_integer(),
+    opt = 0              :: non_neg_integer()
 }).
 
 %%====================================================================
@@ -27,8 +28,12 @@
 %%====================================================================
 -spec gen(list()) -> {ok, #image{}}.
 gen(Items) ->
+    gen(Items, #{}).
+
+-spec gen(list(), map()) -> {ok, #image{}}.
+gen(Items, Opts) ->
     Protos = collect_protos(Items, #{}),
-    G0 = #g{protos = Protos},
+    G0 = #g{protos = Protos, opt = maps:get(opt_level, Opts, 0)},
     G1 = lists:foldl(fun gen_item/2, G0, Items),
     Strings = [maps:get(I, G1#g.strings) || I <- lists:seq(0, G1#g.strcount - 1)],
     Image = #image{
@@ -130,7 +135,7 @@ gen_func(Ret, Name, Params, Var, Body, G0) ->
     Scope = maps:from_list([{N, {T, Off}} || {N, T, Off} <- ParamEntries]),
     G2 = init_frame(G0, NextOff, Scope),
     {Instrs, _T, G3} = gen_stmt(Body, G2),
-    All = Instrs ++ default_ret(Ret),
+    All = fatcc_opt:optimize(Instrs ++ default_ret(Ret), G0#g.opt),
     {Code, _Labels} = fatcc_asm:assemble(All),
     Func = #func{
         name = Name,
@@ -245,10 +250,14 @@ gen_stmt({for, Init, Cond, Step, Body}, G0) ->
                        _ -> gen_expr(Cond, G4)
                    end,
     {IB, _T2, G6} = gen_loop_body(Body, Lend, Lstep, G5),
-    {IS, _T3, G7} = case Step of
-                        none -> {[], void, G6};
-                        _ -> gen_expr(Step, G6)
-                    end,
+    {IS0, StepT, G7} = case Step of
+                            none -> {[], void, G6};
+                            _ -> gen_expr(Step, G6)
+                        end,
+    IS = case StepT of
+             void -> IS0;
+             _ -> IS0 ++ [{pop}]
+         end,
     CondCode = case Cond of
                    none -> [];
                    _ -> IC ++ [{jz, Lend}]

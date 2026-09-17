@@ -228,7 +228,11 @@ is_hex(C) ->
 
 alloc(Vm, Size) ->
     Addr = (Vm#vm.heap_top + 7) band (bnot 7),
-    {Addr, Vm#vm{heap_top = Addr + max(Size, 1)}}.
+    Need = max(Size, 1),
+    case Addr + Need =< Vm#vm.heap_end of
+        true -> {Addr, Vm#vm{heap_top = Addr + Need}};
+        false -> throw({fat_fault, out_of_memory, Vm})
+    end.
 
 pad_cstr(S, N) ->
     case byte_size(S) >= N of
@@ -301,8 +305,14 @@ cmp_elems(Vm0, Base, Size, Cmp, I, J) ->
 
 alloc_scratch(Vm, Bin) ->
     Addr = (Vm#vm.heap_top + 7) band (bnot 7),
-    Mem = fat_mem:write_bytes(Vm#vm.mem, Addr, Bin),
-    {Addr, Vm#vm{mem = Mem, heap_top = Addr + max(byte_size(Bin), 1)}}.
+    Need = max(byte_size(Bin), 1),
+    case Addr + Need =< Vm#vm.heap_end of
+        true ->
+            Mem = fat_mem:write_bytes(Vm#vm.mem, Addr, Bin),
+            {Addr, Vm#vm{mem = Mem, heap_top = Addr + Need}};
+        false ->
+            throw({fat_fault, out_of_memory, Vm})
+    end.
 
 swap_elems(Vm, Base, Size, I, J) ->
     AI = Base + I * Size,
@@ -371,13 +381,25 @@ apply_conv($s, Mods, Addr, Vm) ->
     end;
 apply_conv($p, _Mods, Addr, _Vm) ->
     io_lib:format("0x~.16b", [Addr]);
-apply_conv($f, _Mods, A, _Vm) -> io_lib:format("~.6f", [to_float(A)]);
-apply_conv($e, _Mods, A, _Vm) -> io_lib:format("~.6e", [to_float(A)]);
-apply_conv($g, _Mods, A, _Vm) -> io_lib:format("~p", [to_float(A)]);
+apply_conv($f, Mods, A, _Vm) -> fmt_float("f", precision_of(Mods, 6), to_float(A));
+apply_conv($e, Mods, A, _Vm) -> fmt_float("e", precision_of(Mods, 6), to_float(A));
+apply_conv($g, Mods, A, _Vm) -> fmt_float("g", precision_of(Mods, 6), to_float(A));
 apply_conv(_C, _Mods, A, _Vm) -> io_lib:format("~p", [A]).
 
 to_float(A) when is_float(A) -> A;
 to_float(A) when is_integer(A) -> float(A).
+
+fmt_float(Spec, Precision, F) ->
+    Format = "~." ++ integer_to_list(Precision) ++ Spec,
+    io_lib:format(Format, [F]).
+
+precision_of(Mods, Default) -> precision_of(Mods, Default, 0, false).
+precision_of([$. | R], Default, _Acc, _Seen) -> precision_of(R, Default, 0, true);
+precision_of([C | R], Default, Acc, true) when C >= $0, C =< $9 ->
+    precision_of(R, Default, Acc * 10 + (C - $0), true);
+precision_of([_ | R], Default, Acc, Seen) -> precision_of(R, Default, Acc, Seen);
+precision_of([], Default, Acc, true) -> Acc;
+precision_of([], Default, _Acc, false) -> Default.
 
 %% Very small width/left-align support; precision and other flags ignored.
 pad(Str, Mods) ->
