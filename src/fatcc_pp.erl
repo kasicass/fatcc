@@ -63,7 +63,7 @@ process_file(File, St, Extra) ->
                     check_depth(St1),
                     {Lines, StartLine} = to_lines(Bin),
                     {Toks, St2} = pp_lines(Lines, StartLine, St1, Extra),
-                    {Toks, St2#pp{depth = St#pp.depth}};
+                    {Toks, St2#pp{depth = St#pp.depth, curdir = St#pp.curdir}};
                 {error, Reason} ->
                     throw({pp_error, {1, 1},
                            io_lib:format("cannot read ~s: ~p", [File, Reason])})
@@ -388,7 +388,19 @@ expand([T | Rest], St, Dis) ->
                     case next_is_lparen(Rest) of
                         true ->
                             {Args, Rest2} = collect_args(Rest),
-                            Sub = substitute(Body, Params, Var, Args),
+                            N = length(Params),
+                            Fixed = lists:sublist(Args, N),
+                            RestArgs = safe_nthtail(N, Args),
+                            Special = special_params(Body, Params),
+                            RawMap = maps:from_list(lists:zip(Params, Fixed)),
+                            ExpMap = maps:from_list(
+                                [{P, case lists:member(P, Special) of
+                                         true -> A;
+                                         false -> expand(A, St, [Name | Dis])
+                                     end}
+                                 || {P, A} <- lists:zip(Params, Fixed)]),
+                            ExpRest = [expand(A, St, [Name | Dis]) || A <- RestArgs],
+                            Sub = substitute(Body, Var, ExpMap, RawMap, ExpRest),
                             expand(Sub, St, [Name | Dis]) ++ expand(Rest2, St, Dis);
                         false ->
                             [T | expand(Rest, St, Dis)]
@@ -418,14 +430,12 @@ collect_args([T | R], D, Cur, Acc) ->
 collect_args([], _, _, _) ->
     throw({pp_error, {1, 1}, "unterminated macro arguments"}).
 
-substitute(Body, Params, Var, Args) ->
-    N = length(Params),
-    Fixed = lists:sublist(Args, N),
-    RestArgs = safe_nthtail(N, Args),
-    Map = maps:from_list(lists:zip(Params, Fixed)),
+substitute(Body, Var, ExpMap, RawMap, RestArgs) ->
     lists:flatmap(
-      fun({id, Name, Loc}) ->
-              case maps:find(Name, Map) of
+      fun({punct, '#', _}) -> [];
+         ({punct, '##', _}) -> [];
+         ({id, Name, Loc}) ->
+              case maps:find(Name, ExpMap) of
                   {ok, ArgToks} -> ArgToks;
                   error ->
                       case Var andalso Name =:= "__VA_ARGS__" of
@@ -434,7 +444,91 @@ substitute(Body, Params, Var, Args) ->
                       end
               end;
          (T) -> [T]
-      end, Body).
+      end, expand_hashes(Body, RawMap, ExpMap)).
+
+%% Handle # (stringize) and ## (paste) while walking the body.
+expand_hashes([], _RawMap, _ExpMap) -> [];
+expand_hashes([{punct, '#', _}, {id, Name, Loc} | R], RawMap, ExpMap) ->
+    case maps:find(Name, RawMap) of
+        {ok, ArgToks} ->
+            [{str, stringize(ArgToks), Loc} | expand_hashes(R, RawMap, ExpMap)];
+        error ->
+            [{id, Name, Loc} | expand_hashes(R, RawMap, ExpMap)]
+    end;
+expand_hashes([A, {punct, '##', _}, B | R], RawMap, ExpMap) ->
+    [paste(first_token(A, RawMap), last_token(B, RawMap)) |
+     expand_hashes(R, RawMap, ExpMap)];
+expand_hashes([A | R], RawMap, ExpMap) ->
+    [A | expand_hashes(R, RawMap, ExpMap)].
+
+first_token(T = {id, Name, _}, RawMap) ->
+    case maps:find(Name, RawMap) of
+        {ok, [H | _]} -> H;
+        _ -> T
+    end;
+first_token(T, _) -> T.
+
+last_token(T = {id, Name, _}, RawMap) ->
+    case maps:find(Name, RawMap) of
+        {ok, [_ | _] = L} -> lists:last(L);
+        _ -> T
+    end;
+last_token(T, _) -> T.
+
+%% Parameters used with # or ## must not be pre-expanded.
+special_params(Body, Params) ->
+    lists:usort(sp_walk(Body, Params, undefined, [])).
+
+sp_walk([], _Params, _Prev, Acc) -> Acc;
+sp_walk([{punct, '#', _}, {id, N, _} | R], Params, _Prev, Acc) ->
+    Acc1 = case lists:member(N, Params) of true -> [N | Acc]; false -> Acc end,
+    sp_walk(R, Params, undefined, Acc1);
+sp_walk([T = {punct, '##', _} | R], Params, Prev, Acc) ->
+    Acc1 = case Prev of
+               P when is_list(P) ->
+                   case lists:member(P, Params) of
+                       true -> [P | Acc];
+                       false -> Acc
+                   end;
+               _ -> Acc
+           end,
+    sp_walk(R, Params, T, Acc1);
+sp_walk([{id, N, _} = T | R], Params, Prev, Acc) ->
+    Acc1 = case Prev of
+               {punct, '##', _} -> case lists:member(N, Params) of true -> [N | Acc]; false -> Acc end;
+               _ -> Acc
+           end,
+    sp_walk(R, Params, T, Acc1);
+sp_walk([T | R], Params, _Prev, Acc) ->
+    sp_walk(R, Params, T, Acc).
+
+stringize(Toks) ->
+    Text = string:join([token_text(T) || T <- Toks], " "),
+    list_to_binary(escape_str(Text)).
+
+escape_str([]) -> [];
+escape_str([$\\ | R]) -> [$\\, $\\ | escape_str(R)];
+escape_str([$" | R]) -> [$\\, $" | escape_str(R)];
+escape_str([C | R]) -> [C | escape_str(R)].
+
+paste(A, B) ->
+    S = token_text(A) ++ token_text(B),
+    case fatcc_lex:scan(S, {0, 0}) of
+        [T | _] -> T;
+        [] -> A
+    end.
+
+token_text({punct, P, _}) -> punct_text(P);
+token_text({id, N, _}) -> N;
+token_text({kw, K, _}) -> atom_to_list(K);
+token_text({int, V, _}) -> integer_to_list(V);
+token_text({char, V, _}) -> integer_to_list(V);
+token_text({float, F, _}) -> float_to_list(F, [{decimals, 10}, compact]);
+token_text({str, B, _}) -> "\"" ++ escape_str(binary_to_list(B)) ++ "\"";
+token_text({eof, _}) -> "".
+
+punct_text('...') -> "...";
+punct_text(P) -> atom_to_list(P).
 
 safe_nthtail(N, L) ->
     case length(L) >= N of
