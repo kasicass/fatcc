@@ -55,10 +55,71 @@ gen_item({func, Ret, Name, Params, Var, Body}, G) ->
 %%====================================================================
 %% Globals
 %%====================================================================
-add_global(Type, Name, _Init, G) ->
+add_global(Type, Name, Init, G0) ->
     Size = max(fatcc_type:size(Type), 1),
-    Glob = #global{name = Name, type = Type, init = none, size = Size},
-    G#g{globals = maps:put(Name, Glob, G#g.globals)}.
+    {InitData, G1} = global_init(Type, Init, G0),
+    Glob = #global{name = Name, type = Type, init = InitData, size = Size},
+    G1#g{globals = maps:put(Name, Glob, G1#g.globals)}.
+
+global_init(_Type, none, G) ->
+    {none, G};
+global_init({array, char, N}, {str, B}, G) ->
+    {pad_bin(B, N), G};
+global_init({array, char, undefined}, {str, B}, G) ->
+    {<<B/binary, 0>>, G};
+global_init({ptr, char}, {str, B}, G0) ->
+    {Idx, G1} = add_string(B, G0),
+    {{str_addr, Idx}, G1};
+global_init({array, ElemT, N}, {init_list, Items}, G) when is_integer(N) ->
+    Es = fatcc_type:size(ElemT),
+    Bin = iolist_to_binary([int_bin(const_eval(I), Es) || I <- Items]),
+    {pad_bin(Bin, N * Es), G};
+global_init(Type, Init, G) ->
+    case fatcc_type:is_integer(Type) orelse fatcc_type:is_ptr(Type) of
+        true -> {int_bin(const_eval(Init), fatcc_type:size(Type)), G};
+        false -> {none, G}
+    end.
+
+pad_bin(Bin, N) when byte_size(Bin) >= N -> binary:part(Bin, 0, N);
+pad_bin(Bin, N) -> <<Bin/binary, 0:((N - byte_size(Bin)) * 8)>>.
+
+int_bin(V, Size) ->
+    Masked = V band ((1 bsl (Size * 8)) - 1),
+    list_to_binary([(Masked bsr (8 * I)) band 16#FF || I <- lists:seq(0, Size - 1)]).
+
+const_eval({int, V}) -> V;
+const_eval({char, V}) -> V;
+const_eval({un, '-', E}) -> -const_eval(E);
+const_eval({un, '+', E}) -> const_eval(E);
+const_eval({un, '~', E}) -> bnot const_eval(E);
+const_eval({un, '!', E}) -> bool_int(const_eval(E) =:= 0);
+const_eval({bin, Op, A, B}) ->
+    eval_bin(Op, const_eval(A), const_eval(B));
+const_eval({cast, _, E}) -> const_eval(E);
+const_eval({sizeof_type, T}) -> fatcc_type:size(T);
+const_eval(Other) -> error({non_constant_initializer, Other}).
+
+eval_bin('+', A, B) -> A + B;
+eval_bin('-', A, B) -> A - B;
+eval_bin('*', A, B) -> A * B;
+eval_bin('/', A, B) -> A div B;
+eval_bin('%', A, B) -> A rem B;
+eval_bin('&', A, B) -> A band B;
+eval_bin('|', A, B) -> A bor B;
+eval_bin('^', A, B) -> A bxor B;
+eval_bin('<<', A, B) -> A bsl B;
+eval_bin('>>', A, B) -> A bsr B;
+eval_bin('==', A, B) -> bool_int(A =:= B);
+eval_bin('!=', A, B) -> bool_int(A =/= B);
+eval_bin('<', A, B) -> bool_int(A < B);
+eval_bin('<=', A, B) -> bool_int(A =< B);
+eval_bin('>', A, B) -> bool_int(A > B);
+eval_bin('>=', A, B) -> bool_int(A >= B);
+eval_bin('&&', A, B) -> bool_int(A =/= 0 andalso B =/= 0);
+eval_bin('||', A, B) -> bool_int(A =/= 0 orelse B =/= 0).
+
+bool_int(true) -> 1;
+bool_int(false) -> 0.
 
 %%====================================================================
 %% Functions
@@ -99,6 +160,14 @@ slot_size(Type) ->
     A = max(fatcc_type:align(Type), 1),
     align_up(max(Sz, 1), max(A, 8)).
 
+%% A `char s[] = "..."` / `int a[] = {...}` declaration gets its size from
+%% the initializer.
+resolve_array_type({array, T, undefined}, {str, B}) ->
+    {array, T, byte_size(B) + 1};
+resolve_array_type({array, T, undefined}, {init_list, Items}) ->
+    {array, T, length(Items)};
+resolve_array_type(Type, _Init) -> Type.
+
 align_up(N, A) when A =< 1 -> N;
 align_up(N, A) -> ((N + A - 1) div A) * A.
 
@@ -114,12 +183,15 @@ gen_stmt({block, Stmts}, G) ->
           {I, T, Gy} = gen_stmt(Stmt, Gx),
           {Instrs ++ I, T, Gy}
       end, {[], void, G}, Stmts);
-gen_stmt({var, Type, Name, Init}, G0) ->
+gen_stmt({var, Type0, Name, Init}, G0) ->
+    Type = resolve_array_type(Type0, Init),
     {Off, G1} = alloc_local(Name, Type, G0),
     case Init of
         none -> {[], void, G1};
+        {str, B} when is_tuple(Type), element(1, Type) =:= array ->
+            {[{store_bytes_local, Off, pad_bin(B, fatcc_type:size(Type))}], void, G1};
         {init_list, Items} ->
-            gen_local_init(Type, Off, Items, G1);
+            gen_array_init(Type, Off, Items, G1);
         _ ->
             {I, _T, G2} = gen_expr(Init, G1),
             {I ++ [{store_local, Off, fatcc_type:size(Type)}], void, G2}
@@ -212,13 +284,23 @@ gen_for_init({expr, E}, G0) ->
     {I, _T, G1} = gen_expr(E, G0),
     {I ++ [{pop}], G1}.
 
-gen_local_init(Type, Off, Items, G0) ->
-    case Items of
-        [] -> {[], void, G0};
-        [First | _] ->
-            {I, _T, G1} = gen_expr(First, G0),
-            {I ++ [{store_local, Off, fatcc_type:size(Type)}], void, G1}
-    end.
+gen_array_init(_Type, _Off, [], G) ->
+    {[], void, G};
+gen_array_init(Type, Off, [First | Rest], G0) ->
+    ElemT = case Type of
+                {array, T, _} -> T;
+                _ -> Type
+            end,
+    ES = max(fatcc_type:size(ElemT), 1),
+    {I0, _T, G1} = gen_expr(First, G0),
+    More = gen_array_rest(Rest, Off + ES, ES, G1, []),
+    {I0 ++ [{store_local, Off, ES}] ++ More, void, G1}.
+
+gen_array_rest([], _Off, _ES, G, Acc) ->
+    _ = G, lists:append(lists:reverse(Acc));
+gen_array_rest([E | R], Off, ES, G, Acc) ->
+    {I, _T, _} = gen_expr(E, G),
+    gen_array_rest(R, Off + ES, ES, G, [I ++ [{store_local, Off, ES}] | Acc]).
 
 %%====================================================================
 %% Local allocation
@@ -243,7 +325,12 @@ gen_expr({str, B}, G0) ->
 gen_expr({id, Name}, G) ->
     case maps:find(Name, G#g.scope) of
         {ok, {Type, Off}} ->
-            {[{load_local, Off, fatcc_type:size(Type), fatcc_type:sign_of(Type)}], Type, G};
+            case is_array_or_func(Type) of
+                true ->
+                    {[{lea_local, Off}], {ptr, fatcc_type:base(Type)}, G};
+                false ->
+                    {[{load_local, Off, fatcc_type:size(Type), fatcc_type:sign_of(Type)}], Type, G}
+            end;
         error ->
             case maps:find(Name, G#g.protos) of
                 {ok, {Ret, P, V}} ->
@@ -251,9 +338,14 @@ gen_expr({id, Name}, G) ->
                 error ->
                     case maps:find(Name, G#g.globals) of
                         {ok, #global{type = Type}} ->
-                            {[{push_global_addr, Name},
-                              {load, fatcc_type:size(Type), fatcc_type:sign_of(Type)}],
-                             Type, G};
+                            case is_array_or_func(Type) of
+                                true ->
+                                    {[{push_global_addr, Name}], {ptr, fatcc_type:base(Type)}, G};
+                                false ->
+                                    {[{push_global_addr, Name},
+                                      {load, fatcc_type:size(Type), fatcc_type:sign_of(Type)}],
+                                     Type, G}
+                            end;
                         error ->
                             error({undefined, Name})
                     end
@@ -412,7 +504,7 @@ gen_addr({index, A, I}, G0) ->
     {II, _TI, G2} = gen_expr(I, G1),
     T = fatcc_type:base(fatcc_type:decay(TA)),
     Sz = fatcc_type:size(T),
-    {IA ++ II ++ [{push, Sz}, {mul}, add], T, G2};
+    {IA ++ II ++ [{push, Sz}, mul, add], T, G2};
 gen_addr({member, E, Name, Arrow}, G0) ->
     gen_member_addr(E, Name, Arrow, G0);
 gen_addr({comma, L, R}, G0) ->
@@ -465,6 +557,10 @@ field_type(Members, Name) ->
 elem_type(A, G) ->
     TA = expr_type(A, G),
     fatcc_type:base(fatcc_type:decay(TA)).
+
+is_array_or_func({array, _, _}) -> true;
+is_array_or_func({func, _, _, _}) -> true;
+is_array_or_func(_) -> false.
 
 %%====================================================================
 %% Arithmetic helpers

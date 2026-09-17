@@ -77,6 +77,9 @@ exec({store_local, Off, Size}, Vm) ->
     [V | S] = Vm#vm.stack,
     Mem = fat_mem:write(Vm#vm.mem, Vm#vm.fp + Off, Size, V),
     bump(Vm#vm{mem = Mem, stack = S});
+exec({store_bytes_local, Off, Bin}, Vm) ->
+    Mem = fat_mem:write_bytes(Vm#vm.mem, Vm#vm.fp + Off, Bin),
+    bump(Vm#vm{mem = Mem});
 exec({lea_local, Off}, Vm) ->
     bump(Vm#vm{stack = [Vm#vm.fp + Off | Vm#vm.stack]});
 exec({load, Size, Sign}, Vm) ->

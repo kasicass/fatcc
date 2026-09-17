@@ -27,7 +27,7 @@ start(Path, Args, Opts) ->
 init_vm(#image{} = Image, Opts) ->
     Mem0 = fat_mem:new(),
     {Mem1, StrMap, AfterStrings} = write_strings(Image#image.strings, ?RODATA_BASE, 0, #{}, Mem0),
-    {Mem2, GlobMap, _} = write_globals(Image#image.globals, max(AfterStrings, ?GLOBAL_BASE), #{}, Mem1),
+    {Mem2, GlobMap, _} = write_globals(Image#image.globals, max(AfterStrings, ?GLOBAL_BASE), #{}, StrMap, Mem1),
     #vm{
         funcs = Image#image.funcs,
         strings = StrMap,
@@ -50,12 +50,15 @@ write_strings([S | Rest], Addr, Idx, Map, Mem) ->
     Mem1 = fat_mem:write_bytes(Mem, Addr, Bin),
     write_strings(Rest, Addr + byte_size(Bin), Idx + 1, maps:put(Idx, Addr, Map), Mem1).
 
-write_globals(Globals, Addr, Map, Mem) ->
+write_globals(Globals, Addr0, Map0, StrMap, Mem0) ->
     maps:fold(
-      fun(Name, #global{size = Size, init = Init}, {M, A, Acc}) ->
-          M1 = case Init of
-                   none -> M;
-                   Bin when is_binary(Bin) -> fat_mem:write_bytes(M, A, Bin)
-               end,
-          {M1, maps:put(Name, A, Acc), A + max(Size, 1)}
-      end, {Mem, Map, Addr}, Globals).
+      fun(Name, #global{size = Size, init = Init}, {Mem, Map, Addr}) ->
+          Mem1 = write_global_init(Mem, Addr, Init, StrMap),
+          {Mem1, maps:put(Name, Addr, Map), Addr + max(Size, 1)}
+      end, {Mem0, Map0, Addr0}, Globals).
+
+write_global_init(Mem, _Addr, none, _StrMap) -> Mem;
+write_global_init(Mem, Addr, Bin, _StrMap) when is_binary(Bin) ->
+    fat_mem:write_bytes(Mem, Addr, Bin);
+write_global_init(Mem, Addr, {str_addr, Idx}, StrMap) ->
+    fat_mem:write(Mem, Addr, 8, maps:get(Idx, StrMap)).

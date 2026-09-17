@@ -119,6 +119,7 @@ parse_init_items(Toks, Acc) ->
     {E, R} = parse_assign(Toks),
     parse_init_items_cont(R, [E | Acc]).
 
+parse_init_items_cont([{punct, '}', _} | R], Acc) -> {lists:reverse(Acc), R};
 parse_init_items_cont([{punct, ',', _} | R], Acc) -> parse_init_items(R, Acc);
 parse_init_items_cont(R, Acc) -> {lists:reverse(Acc), R}.
 
@@ -353,8 +354,50 @@ parse_array_size([{punct, ']', _} | _] = Toks) -> {undefined, Toks};
 parse_array_size(Toks) ->
     case is_qualifier_or_static(Toks) of
         true -> parse_array_size(skip_static(Toks));
-        false -> parse_assign(Toks)
+        false ->
+            {E, R} = parse_assign(Toks),
+            {const_int(E), R}
     end.
+
+%% Evaluate a compile-time integer constant expression (array sizes, enum
+%% values, case labels).
+const_int({int, V}) -> V;
+const_int({char, V}) -> V;
+const_int({un, '-', E}) -> -const_int(E);
+const_int({un, '+', E}) -> const_int(E);
+const_int({un, '~', E}) -> bnot const_int(E);
+const_int({un, '!', E}) -> bool_i(const_int(E) =:= 0);
+const_int({bin, Op, A, B}) -> ci_bin(Op, const_int(A), const_int(B));
+const_int({ternary, C, T, F}) ->
+    case const_int(C) =/= 0 of
+        true -> const_int(T);
+        false -> const_int(F)
+    end;
+const_int({cast, _, E}) -> const_int(E);
+const_int({sizeof_type, T}) -> fatcc_type:size(T);
+const_int(E) -> err({1, 1}, "non-constant integer expression: ~p", [E]).
+
+ci_bin('+', A, B) -> A + B;
+ci_bin('-', A, B) -> A - B;
+ci_bin('*', A, B) -> A * B;
+ci_bin('/', A, B) -> A div B;
+ci_bin('%', A, B) -> A rem B;
+ci_bin('&', A, B) -> A band B;
+ci_bin('|', A, B) -> A bor B;
+ci_bin('^', A, B) -> A bxor B;
+ci_bin('<<', A, B) -> A bsl B;
+ci_bin('>>', A, B) -> A bsr B;
+ci_bin('==', A, B) -> bool_i(A =:= B);
+ci_bin('!=', A, B) -> bool_i(A =/= B);
+ci_bin('<', A, B) -> bool_i(A < B);
+ci_bin('<=', A, B) -> bool_i(A =< B);
+ci_bin('>', A, B) -> bool_i(A > B);
+ci_bin('>=', A, B) -> bool_i(A >= B);
+ci_bin('&&', A, B) -> bool_i(A =/= 0 andalso B =/= 0);
+ci_bin('||', A, B) -> bool_i(A =/= 0 orelse B =/= 0).
+
+bool_i(true) -> 1;
+bool_i(false) -> 0.
 
 is_qualifier_or_static([{kw, K, _} | _]) when K =:= const; K =:= volatile; K =:= restrict; K =:= static -> true;
 is_qualifier_or_static(_) -> false.
